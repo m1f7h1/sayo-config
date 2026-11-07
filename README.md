@@ -1,4 +1,4 @@
-# Key Grid
+# sayo-config
 
 A Python app that opens its UI in a foreground browser window. The 2×6 grid is
 made of twelve separate inline SVG key items and reads/writes SayoDevice 2×6V
