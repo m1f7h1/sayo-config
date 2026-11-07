@@ -26,6 +26,9 @@ KEY_RECORD_SIZE = 8          # pattern, number, type, retain, four key bytes
 V2_REPORT_ID = 0x21
 V2_COMMAND = 0x12
 V2_LIGHT = 0x11
+LED_STATIC = 0
+LED_EVENT_NONE = 0
+LED_EVENT_PRESS_ON_RELEASE_OFF = 1
 
 
 def _setup_darwin():
@@ -258,8 +261,15 @@ class Device:
         record = self._read_led_record(n)
         return tuple(record[28:31])
 
-    def write_led(self, n, r, g, b, mode=0):
-        """Set LED for key index n (0..11) to static RGB color.
+    def read_led_config(self, n):
+        """Return an LED's RGB color, mode, and key-event behaviour."""
+        if not 0 <= n < NUM_KEYS:
+            raise ValueError(f"LED number must be 0-{NUM_KEYS - 1}, got {n}")
+        record = self._read_led_record(n)
+        return tuple(record[28:31]), record[24], record[25]
+
+    def write_led(self, n, r, g, b, mode=LED_STATIC, event=LED_EVENT_NONE):
+        """Set an LED's RGB color and optional key-event behaviour.
 
         Uses HID v2 Light records on usage page 0xFF11, preserving the rest of
         the LED record and signing the complete 64-byte report.
@@ -268,11 +278,13 @@ class Device:
             raise ValueError(f"LED number must be 0-{NUM_KEYS - 1}, got {n}")
         if any(not 0 <= c <= 255 for c in (r, g, b)):
             raise ValueError("LED RGB channels must be between 0 and 255")
+        if not 0 <= mode <= 0xFF or not 0 <= event <= 0xFF:
+            raise ValueError("LED mode and event must be between 0 and 255")
         record = self._read_led_record(n)
         record[0:8] = bytes([V2_REPORT_ID, V2_COMMAND, 0, 0, 0x3C, 0,
                              V2_LIGHT, n])
         record[24] = mode
-        record[25] = 0
+        record[25] = event
         record[26] = 0x64
         record[27] = 0x64
         record[28:31] = bytes([r, g, b])

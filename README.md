@@ -16,7 +16,7 @@ select it. Ordinary Mac keyboard input never selects a key. The active SVG key
 gets a red border and reveals the LED color wheel configurator.
 
 - **Shortcut binding**: Press a shortcut on the Mac keyboard to preview it.
-- **LED lighting**: Pick a color using the interactive color wheel, brightness slider, hex input, or preset swatches to preview it on the active key.
+- **LED lighting**: Pick a color using the interactive color wheel, brightness slider, hex input, or preset swatches to preview it on the active key. Enable **Light only while this key is pressed** to keep that key dark until it is held down.
 - **Saving**: Click the active key to save the new shortcut and/or LED color directly to the keypad's flash memory.
 
 A shortcut is one key plus any combination of Ctrl, Shift, Option, and Command.

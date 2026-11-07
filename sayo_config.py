@@ -218,6 +218,10 @@ def page_html():
             <label for="val-slider">Brightness</label>
             <input type="range" id="val-slider" min="0" max="100" value="100">
           </div>
+          <label class="slider-row" style="justify-content:flex-start; gap:8px;">
+            <input type="checkbox" id="press-lighting">
+            Light only while this key is pressed
+          </label>
           <div class="swatches" id="swatches"></div>
         </div>
       </div>
@@ -236,6 +240,7 @@ def page_html():
     const colorChip = document.querySelector('#color-chip');
     const nativeColor = document.querySelector('#native-color');
     const hexInput = document.querySelector('#hex-input');
+    const pressLighting = document.querySelector('#press-lighting');
     const swatchesContainer = document.querySelector('#swatches');
 
     const PRESET_COLORS = [
@@ -253,7 +258,7 @@ def page_html():
       swatchesContainer.appendChild(b);
     }});
 
-    let state = {{ bindings: {{}}, colors: {{}}, active: null, pending: null, pending_color: null }};
+    let state = {{ bindings: {{}}, colors: {{}}, press_lighting: {{}}, active: null, pending: null, pending_color: null, pending_press_lighting: null }};
     let chordHasKey = false;
     let currentHSV = {{ h: 0, s: 0, v: 1 }};
     let isDraggingWheel = false;
@@ -368,6 +373,19 @@ def page_html():
       }}
     }}
 
+    async function setPressLighting(enabled) {{
+      if (state.active === null) return;
+      state.pending_press_lighting = enabled;
+      draw();
+      try {{
+        state = await api('/api/press-lighting', {{ key: state.active, enabled }});
+        draw();
+      }} catch (err) {{
+        state.error = err.message;
+        draw();
+      }}
+    }}
+
     function setColorFromHex(hex, send = true) {{
       const [r, g, b] = hexToRgb(hex);
       currentHSV = rgbToHsv(r, g, b);
@@ -428,6 +446,7 @@ def page_html():
     nativeColor.addEventListener('input', e => {{
       setColorFromHex(e.target.value, true);
     }});
+    pressLighting.addEventListener('change', e => setPressLighting(e.target.checked));
 
     function wrapLabel(label) {{
       if (!label || label === '—') return ['—'];
@@ -485,6 +504,7 @@ def page_html():
         const [r, g, b] = hexToRgb(activeColor);
         currentHSV = rgbToHsv(r, g, b);
         updateColorUI(rgbToHex(r, g, b));
+        pressLighting.checked = state.pending_press_lighting ?? Boolean(state.press_lighting[state.active]);
       }} else {{
         colorPanel.classList.remove('visible');
       }}
@@ -494,8 +514,9 @@ def page_html():
         let parts = [];
         if (state.pending) parts.push(`shortcut '${{state.pending}}'`);
         if (state.pending_color) parts.push(`color ${{state.pending_color}}`);
+        if (state.pending_press_lighting !== null) parts.push(state.pending_press_lighting ? 'press-only lighting' : 'always-on lighting');
         const previewText = parts.length > 0 ? parts.join(' and ') : 'shortcut/color';
-        const instruction = (state.pending || state.pending_color)
+        const instruction = (state.pending || state.pending_color || state.pending_press_lighting !== null)
           ? `Key ${{state.active}}: previewing ${{previewText}}. Click this key to save or another key to discard.`
           : `Key ${{state.active}} active. Press a shortcut or pick a color, then click this key to save or another to discard.`;
         statusLine.textContent = state.warning ? `${{instruction}} ${{state.warning}}` : instruction;
@@ -569,12 +590,14 @@ class App:
         self.device_module = None
         self.bindings = {}
         self.colors = {n: "#FFFFFF" for n in range(1, 13)}
+        self.press_lighting = {n: False for n in range(1, 13)}
         self.saved_records = {}
         self.markers_installed = False
         self.warning = None
         self.active = None
         self.pending = None
         self.pending_color = None
+        self.pending_press_lighting = None
         self.error = None
         self.ready = False
         self.message = "Opening keypad…"
@@ -592,10 +615,11 @@ class App:
                 if code:
                     self.bindings[n + 1] = combo_name(sayo.Combo(mods, code))
                 try:
-                    if hasattr(self.device, "read_led"):
-                        led_rgb = self.device.read_led(n)
+                    if hasattr(self.device, "read_led_config"):
+                        led_rgb, _mode, event = self.device.read_led_config(n)
                         if led_rgb is not None:
                             self.colors[n + 1] = f"#{led_rgb[0]:02X}{led_rgb[1]:02X}{led_rgb[2]:02X}"
+                            self.press_lighting[n + 1] = event == device_module.LED_EVENT_PRESS_ON_RELEASE_OFF
                 except Exception:
                     pass
             self.install_physical_markers()
@@ -652,12 +676,18 @@ class App:
             record[self.device_module.V1 + 2] = 0
             self.saved_records[index] = bytes(record)
             self.bindings[key_number] = self.pending
-        if self.pending_color:
-            c = self.pending_color.lstrip("#")
+        if self.pending_color or self.pending_press_lighting is not None:
+            color = self.pending_color or self.colors[key_number]
+            c = color.lstrip("#")
             r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
-            actual = self.device.write_led(key_number - 1, r, g, b)
+            press_only = (self.pending_press_lighting if self.pending_press_lighting is not None
+                          else self.press_lighting[key_number])
+            event = (self.device_module.LED_EVENT_PRESS_ON_RELEASE_OFF if press_only
+                     else self.device_module.LED_EVENT_NONE)
+            actual = self.device.write_led(key_number - 1, r, g, b, event=event)
             self.colors[key_number] = "#%02X%02X%02X" % actual
-        if self.pending_color:
+            self.press_lighting[key_number] = press_only
+        if self.pending_color or self.pending_press_lighting is not None:
             self.device.save_led()
         elif self.pending:
             self.device.save()
@@ -670,11 +700,34 @@ class App:
         if self.active != n:
             self.active = n
             self.pending = None
+            self.pending_press_lighting = None
         self.pending_color = hex_color.upper()
         # Preview on the hardware and surface any HID/write-back failure.
         c = self.pending_color.lstrip("#")
         r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
-        actual = self.device.write_led(n - 1, r, g, b)
+        press_only = (self.pending_press_lighting if self.pending_press_lighting is not None
+                      else self.press_lighting[n])
+        event = (self.device_module.LED_EVENT_PRESS_ON_RELEASE_OFF if press_only
+                 else self.device_module.LED_EVENT_NONE)
+        actual = self.device.write_led(n - 1, r, g, b, event=event)
+        self.pending_color = "#%02X%02X%02X" % actual
+        return self.state()
+
+    def set_press_lighting(self, n, enabled):
+        """Preview whether the active key lights only while held down."""
+        if not self.ready:
+            raise RuntimeError(self.error or "The keypad is not connected.")
+        if self.active != n:
+            self.active = n
+            self.pending = None
+            self.pending_color = None
+        self.pending_press_lighting = bool(enabled)
+        color = self.pending_color or self.colors[n]
+        c = color.lstrip("#")
+        r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        event = (self.device_module.LED_EVENT_PRESS_ON_RELEASE_OFF if enabled
+                 else self.device_module.LED_EVENT_NONE)
+        actual = self.device.write_led(n - 1, r, g, b, event=event)
         self.pending_color = "#%02X%02X%02X" % actual
         return self.state()
 
@@ -682,8 +735,10 @@ class App:
         if not self.ready:
             self.connect()
         result = {"bindings": self.bindings, "colors": self.colors,
+                  "press_lighting": self.press_lighting,
                   "active": self.active, "pending": self.pending,
-                  "pending_color": self.pending_color, "ready": self.ready,
+                  "pending_color": self.pending_color,
+                  "pending_press_lighting": self.pending_press_lighting, "ready": self.ready,
                   "error": self.error, "message": self.message,
                   "warning": self.warning}
         result.update(extra)
@@ -695,20 +750,24 @@ class App:
             raise RuntimeError(self.error or "The keypad is not connected.")
         if n == self.active:
             # Same key again: persist its pending mapping and/or color and turn it off.
-            if self.pending or self.pending_color:
+            if self.pending or self.pending_color or self.pending_press_lighting is not None:
                 self.persist_pending(n)
             self.active = None
             self.pending = None
             self.pending_color = None
+            self.pending_press_lighting = None
         else:
             # Different key: discard the old preview and switch selection.
             if self.active is not None and self.pending_color:
                 old_color = self.colors.get(self.active, "#FFFFFF").lstrip("#")
                 r, g, b = (int(old_color[i:i + 2], 16) for i in (0, 2, 4))
-                self.device.write_led(self.active - 1, r, g, b)
+                event = (self.device_module.LED_EVENT_PRESS_ON_RELEASE_OFF
+                         if self.press_lighting[self.active] else self.device_module.LED_EVENT_NONE)
+                self.device.write_led(self.active - 1, r, g, b, event=event)
             self.active = n
             self.pending = None
             self.pending_color = None
+            self.pending_press_lighting = None
         self.error = None
         return self.state()
 
@@ -789,6 +848,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Key number must be between 1 and 12.")
                 color = str(data["color"])
                 self.respond(app.set_color(n, color))
+            elif self.path == "/api/press-lighting":
+                n = int(data["key"])
+                if not 1 <= n <= 12:
+                    raise ValueError("Key number must be between 1 and 12.")
+                self.respond(app.set_press_lighting(n, bool(data["enabled"])))
             else:
                 self.send_error(404)
         except Exception as exc:
